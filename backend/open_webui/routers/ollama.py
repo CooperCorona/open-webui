@@ -1509,6 +1509,67 @@ async def generate_responses(
     )
 
 
+class SystemOneForm(BaseModel):
+    model: str
+
+    model_config = ConfigDict(extra='allow')
+
+
+@router.post('/v1/systemone')
+@router.post('/v1/systemone/{url_idx}')
+async def generate_systemone(
+    request: Request,
+    form_data: SystemOneForm,
+    url_idx: int | None = None,
+    user=Depends(get_verified_user),
+):
+    """
+    Proxy for Ollama's System One decision endpoint (/v1/systemone).
+
+    System One ("Jev-style") decision models take a `state` plus typed
+    `questions` (choice / noul / score) and return calibrated answers in a
+    single JSON response. Streaming is not supported upstream, so the
+    response is always returned as JSON.
+
+    Applies the same model resolution, access control, and prefix_id
+    handling as the other /v1/* proxies. Requires Ollama v0.35.0+.
+
+    See https://docs.ollama.com/api/systemone
+    """
+    if not await Config.get('ollama.enable'):
+        raise HTTPException(status_code=503, detail=ERROR_MESSAGES.OLLAMA_API_DISABLED)
+
+    payload = form_data.model_dump()
+    model_id = form_data.model
+    request.state.model_id = model_id
+
+    model_info = await Models.get_model_by_id(model_id)
+    if model_info:
+        if model_info.base_model_id:
+            payload['model'] = model_info.base_model_id
+
+        await check_model_access(user, model_info)
+    else:
+        await check_model_access(user, None)
+
+    url, url_idx = await get_ollama_url(request, payload['model'], url_idx, user)
+    api_configs = await Config.get('ollama.api_configs', {})
+    api_config = api_configs.get(str(url_idx), api_configs.get(url, {}))  # Legacy support
+
+    prefix_id = api_config.get('prefix_id', None)
+    payload['model'] = strip_provider_model_prefix(payload['model'], prefix_id)
+
+    return await send_request(
+        f'{url}/v1/systemone',
+        payload=JSONCodec.dumps(payload),
+        key=get_api_key(url_idx, url, api_configs),
+        user=user,
+        stream=False,
+        api_config=api_config,
+        request=request,
+    )
+
+
 @router.get('/v1/models')
 @router.get('/v1/models/{url_idx}')
 async def get_openai_models(
